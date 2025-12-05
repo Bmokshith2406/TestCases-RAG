@@ -1,86 +1,211 @@
-Intelligent Test Case Search Engine
+# Intelligent Test Case Search Engine
 
-This project provides a web interface to upload test case files (CSV/XLSX), enrich them using the Google Gemini API, and store them in a MongoDB collection with vector embeddings for fast and intelligent semantic search.
+This project provides a **web-based platform** for uploading software test case files (`CSV` / `XLSX`), enriching them using the **Google Gemini API**, and storing them in **MongoDB with vector embeddings** to enable **fast and accurate semantic search**.
 
-Features
-File Upload: Supports both CSV and XLSX file formats.
+The system combines LLM-based data enrichment with modern vector databases to deliver **intelligent retrieval of test cases** using natural language queries.
 
-    AI Enrichment: Automatically generates a summary and keywords for each test case using Google Gemini.
+---
 
-    Vector Search: Uses sentence-transformers and MongoDB Atlas Vector Search to find the most semantically similar test cases to a search query.
+---
 
-    Web Interface: A clean and simple UI built with FastAPI, HTML, and Tailwind CSS.
+## Features
 
-    REST API: Simple API endpoints for uploading, searching, updating, and deleting test cases.
+- **File Upload**
+  - Supports both `.csv` and `.xlsx` formats.
 
-Project Structure
+- **AI Enrichment**
+  - Automatically generates summaries and keywords for each test case using Google Gemini.
+
+- **Vector Search**
+  - Utilizes **Sentence-Transformers** and **MongoDB Atlas Vector Search** to locate semantically similar test cases.
+
+- **Web Interface**
+  - Clean and simple UI built using:
+    - FastAPI
+    - HTML
+    - Tailwind CSS
+
+- **REST API**
+  - Endpoints for:
+    - Uploading test cases
+    - Searching existing records
+    - Updating test cases
+    - Deleting records
+
+---
+
+---
+
+## Project Structure
+
+```
+
 .
-├── main.py # FastAPI backend application
-├── index.html # Frontend HTML file
-├── requirements.txt # Python dependencies
-└── README.md # This setup guide
+├── main.py          # FastAPI backend application
+├── index.html      # Frontend UI
+├── requirements.txt
+└── README.md
 
-Setup and Installation
-Step 1: Prerequisites
-Python 3.8+: Make sure you have a modern version of Python installed.
+````
 
-        MongoDB Atlas: Create a free cluster on MongoDB Atlas and get your connection string.
+---
 
-        Google Gemini API Key: You need an API key from Google AI Studio.
+---
 
-        Visit the link and click on Get API key.
+## Setup and Installation
 
-        Create a new key and copy it for later use.
+---
 
-Step 2: Set Up the Python Environment
-Create and activate a virtual environment:
+### Step 1 — Prerequisites
 
-    macOS/Linux:
-        python3 -m venv venv
-        source venv/bin/activate
+Ensure the following are available:
 
-    Windows:
-        python -m venv venv
-        .\venv\Scripts\activate
+- **Python 3.8+**
+- **MongoDB Atlas**
+  - Create a free cluster and obtain your connection string.
+- **Google Gemini API Key**
+  - Visit Google AI Studio
+  - Click **Get API key**
+  - Create and save your API key
 
-    Install the required packages:
-        pip install -r requirements.txt
+---
 
-Step 3: Configure the Application
-Open the main.py file and update the following variables with your credentials:
+---
 
-    # MongoDB connection string (replace with your Atlas URI)
+### Step 2 — Create Virtual Environment
 
-        MONGO_CONNECTION_STRING = "YOUR_MONGODB_ATLAS_URI"
+Create and activate a Python virtual environment.
 
-    # Google Gemini API key
+#### macOS / Linux
 
-        GOOGLE_API_KEY = "YOUR_GEMINI_API_KEY"
+```bash
+python3 -m venv venv
+source venv/bin/activate
+````
 
-Step 4: Run the FastAPI Application
-With your virtual environment activated, run the server:
+#### Windows
 
-        uvicorn main:app --reload
+```bash
+python -m venv venv
+.\venv\Scripts\activate
+```
 
-        uvicorn: The ASGI server that runs your FastAPI application.
-        main:app: Tells uvicorn to use the app object in main.py.
-        --reload: Automatically restarts the server when you make code changes.
+---
 
-Step 5: Use the Application
-Open your browser and go to: http://127.0.0.1:8000
+### Install Dependencies
 
-Upload a File: Click "Choose file," select your CSV/XLSX file, and hit "Upload and Process."
+```bash
+pip install -r requirements.txt
+```
 
-Search: Type your query in the search box and click "Search." The most relevant results will appear.
+---
 
-How It Works: Multi-Level Indexing Concept
-While this implementation uses MongoDB Vector Search for simplicity, performance can be improved on large datasets using a multi-level indexing strategy.
+---
 
-This involves pre-filtering documents before performing the vector search. For example, one could first use an LLM to categorize a search query (e.g., "fix login error" → Feature: "Login Page") and then perform the vector search only on documents with that matching feature. This two-step process narrows the search space, making it faster and more accurate.
+## Configuration
 
+Open `main.py` and update the credentials:
 
+```python
+# MongoDB connection string
+MONGO_CONNECTION_STRING = "YOUR_MONGODB_ATLAS_URI"
 
-Config Mongo:
+# Google Gemini API key
+GOOGLE_API_KEY = "YOUR_GEMINI_API_KEY"
+```
+
+---
+
+---
+
+## Running the Application
+
+Start the FastAPI server:
+
+```bash
+uvicorn main:app --reload
+```
+
+**Command Breakdown**
+
+| Component  | Description                         |
+| ---------- | ----------------------------------- |
+| `uvicorn`  | ASGI server                         |
+| `main:app` | Loads `app` instance from `main.py` |
+| `--reload` | Enables auto-reload on code changes |
+
+---
+
+---
+
+## Using the Application
+
+Open your browser:
+
+```
+http://127.0.0.1:8000
+```
+
+---
+
+### Upload Flow
+
+1. Click **Choose File**
+2. Select a `.csv` or `.xlsx` file
+3. Click **Upload and Process**
+
+---
+
+### Search Flow
+
+1. Enter your query in the search box
+2. Click **Search**
+3. View the top matching test cases ranked by semantic similarity
+
+---
+
+---
+
+## How It Works: Multi-Level Indexing
+
+This implementation uses MongoDB **Vector Search** for semantic retrieval.
+
+For large datasets, performance can be significantly enhanced using a **multi-level indexing strategy**:
+
+---
+
+### Two-Step Retrieval Concept
+
+```text
+Query
+   ↓
+LLM Feature Classification
+   ↓
+Metadata Filtering (Ex: Feature = "Login Page")
+   ↓
+MongoDB Vector Search (within filtered subset)
+   ↓
+Final semantic ranking
+```
+
+---
+
+### Benefits
+
+* Smaller search space
+* Faster response times
+* Improved relevance accuracy
+* Lower compute cost
+
+---
+
+---
+
+## MongoDB Vector Index Configuration
+
+Create a vector index on the field **`main_vector`**:
+
+```json
 {
   "fields": [
     {
@@ -91,3 +216,26 @@ Config Mongo:
     }
   ]
 }
+```
+
+---
+
+### Index Name
+
+```
+vector_index
+```
+
+---
+
+---
+
+## Summary
+
+This project demonstrates a practical implementation of **LLM-powered semantic search** for software test cases, combining:
+
+* Gemini-based AI enrichment
+* SentenceTransformer embeddings
+* MongoDB vector indexing
+* A simple web UI and REST interface
+
