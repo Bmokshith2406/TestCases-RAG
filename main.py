@@ -1,4 +1,4 @@
-# app.py
+# app.py - production-ready variant
 import os
 import io
 import time
@@ -7,6 +7,7 @@ import logging
 import numpy as np
 import pandas as pd
 import google.generativeai as genai
+import asyncio
 
 from typing import List, Dict, Any, Tuple
 from fastapi import Body, HTTPException, FastAPI, File, UploadFile, Request
@@ -21,20 +22,24 @@ from sentence_transformers import SentenceTransformer
 
 from fastapi.middleware.cors import CORSMiddleware
 import re
-from bson import ObjectId
 
 # --- Load env ---
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 MONGO_CONNECTION_STRING = os.getenv("MONGO_CONNECTION_STRING")
+CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "*")
 
-DB_NAME = "test_case_db"
-COLLECTION_NAME = "multilevel_test_cases_mongo"
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
-VECTOR_INDEX_NAME = "vector_index"
+DB_NAME = os.getenv("DB_NAME", "test_case_db")
+COLLECTION_NAME = os.getenv("COLLECTION_NAME", "multilevel_test_cases_mongo")
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
+VECTOR_INDEX_NAME = os.getenv("VECTOR_INDEX_NAME", "vector_index")
 
-# --- Logging ---
-logging.basicConfig(level=logging.INFO)
+# --- Logging (structured) ---
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 # --- Globals ---
@@ -44,19 +49,20 @@ db_collection: Any | None = None  # Motor collection handle
 
 # --- Cache ---
 SEARCH_CACHE: Dict[str, Tuple[float, Any]] = {}
-CACHE_TTL_SECONDS = 60 * 5  # 5 minutes
+CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", 60 * 5))  # default 5 minutes
 
 # --- Config ---
-CANDIDATES_TO_RETRIEVE = 15
-FINAL_RESULTS = 3
-GEMINI_RERANK_ENABLED = True
-QUERY_EXPANSION_ENABLED = True
-DIVERSITY_ENFORCE = True
-DIVERSITY_PER_FEATURE = True
-GEMINI_RATE_LIMIT_SLEEP = 0.5
-GEMINI_RETRIES = 2  # number of retries for enrichment/rerank
+CANDIDATES_TO_RETRIEVE = int(os.getenv("CANDIDATES_TO_RETRIEVE", 15))
+FINAL_RESULTS = int(os.getenv("FINAL_RESULTS", 3))
+GEMINI_RERANK_ENABLED = os.getenv("GEMINI_RERANK_ENABLED", "true").lower() in ("1", "true", "yes")
+QUERY_EXPANSION_ENABLED = os.getenv("QUERY_EXPANSION_ENABLED", "true").lower() in ("1", "true", "yes")
+DIVERSITY_ENFORCE = os.getenv("DIVERSITY_ENFORCE", "true").lower() in ("1", "true", "yes")
+DIVERSITY_PER_FEATURE = os.getenv("DIVERSITY_PER_FEATURE", "true").lower() in ("1", "true", "yes")
+GEMINI_RATE_LIMIT_SLEEP = float(os.getenv("GEMINI_RATE_LIMIT_SLEEP", 0.5))
+GEMINI_RETRIES = int(os.getenv("GEMINI_RETRIES", 2))
 
 # --- Helpers ---
+
 def numpy_to_list(v) -> List[float]:
     if v is None:
         return []
@@ -66,8 +72,8 @@ def numpy_to_list(v) -> List[float]:
         arr = np.asarray(v, dtype=float)
         return [float(x) for x in arr.tolist()]
     except Exception:
-        # final fallback: try iterating
         return [float(x) for x in list(v)]
+
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     if a is None or b is None:
@@ -77,6 +83,7 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
         return 0.0
     denom = np.linalg.norm(a) * np.linalg.norm(b)
     return float(np.dot(a, b) / denom) if denom != 0 else 0.0
+
 
 def cache_get(query: str):
     entry = SEARCH_CACHE.get(query)
@@ -88,8 +95,10 @@ def cache_get(query: str):
         return None
     return value
 
+
 def cache_set(query: str, value: Any):
     SEARCH_CACHE[query] = (time.time(), value)
+
 
 def safe_parse_lines(text: str) -> List[str]:
     return [l.strip() for l in text.splitlines() if l.strip()]
@@ -106,6 +115,7 @@ _STOPWORDS = set(
     you'd you'll you're you've your yours yourself yourselves""".split()
 )
 
+
 def extract_keywords(text: str, max_keywords: int = 15) -> List[str]:
     if not text:
         return []
@@ -113,6 +123,7 @@ def extract_keywords(text: str, max_keywords: int = 15) -> List[str]:
     words = re.findall(r"\b[a-zA-Z0-9\-']+\b", text)
     words_filtered = [w for w in words if w not in _STOPWORDS and len(w) > 2]
     from collections import Counter
+
     uni_counts = Counter(words_filtered)
     bigrams = [" ".join(pair) for pair in zip(words_filtered, words_filtered[1:])]
     big_counts = Counter(bigrams)
@@ -133,6 +144,7 @@ def extract_keywords(text: str, max_keywords: int = 15) -> List[str]:
             seen.add(k)
     return final
 
+
 def build_fallback_summary(description: str, steps: str, max_sentences: int = 2) -> str:
     text = (description or "").strip()
     if steps:
@@ -147,15 +159,17 @@ def build_fallback_summary(description: str, steps: str, max_sentences: int = 2)
     return (summary[:800] + "...") if len(summary) > 800 else summary
 
 # --- Gemini helpers (expansion, rerank, enrichment) ---
+
 def configure_gemini():
     try:
         if GOOGLE_API_KEY:
             genai.configure(api_key=GOOGLE_API_KEY)
-            logger.info("Gemini configured.")
+            logger.info("Gemini configured")
         else:
-            logger.warning("GOOGLE_API_KEY not set; Gemini disabled.")
+            logger.warning("GOOGLE_API_KEY not set; Gemini features disabled")
     except Exception as e:
-        logger.error(f"Failed to configure Gemini: {e}")
+        logger.error(f"Failed to configure Gemini: {e}", exc_info=True)
+
 
 def expand_query_with_gemini(query: str) -> List[str]:
     if not QUERY_EXPANSION_ENABLED or not GOOGLE_API_KEY:
@@ -177,6 +191,7 @@ Query: "{query}"
         logger.warning(f"expand_query_with_gemini failed: {e}")
         return [query]
 
+
 def _parse_gemini_enrichment_text(text: str) -> Tuple[str, List[str]]:
     summary = ""
     keywords = []
@@ -193,6 +208,7 @@ def _parse_gemini_enrichment_text(text: str) -> Tuple[str, List[str]]:
     if not keywords:
         keywords = extract_keywords(text, max_keywords=15)
     return summary, keywords
+
 
 def get_gemini_enrichment(test_case_description: str, feature: str, steps: str = "") -> dict:
     description_text = (test_case_description or "").strip()
@@ -226,7 +242,6 @@ Keywords: <15-20+ diverse keywords/phrases, comma-separated>
                 logger.warning(f"Gemini enrichment attempt {attempt+1} failed: {e}")
                 time.sleep(GEMINI_RATE_LIMIT_SLEEP)
 
-        # last attempt: try once more and merge partials with fallback
         try:
             response = model.generate_content(prompt)
             text = response.text.strip()
@@ -241,6 +256,7 @@ Keywords: <15-20+ diverse keywords/phrases, comma-separated>
         logger.error(f"Error invoking Gemini enrichment: {e}", exc_info=True)
         return {"summary": fallback_summary, "keywords": fallback_keywords}
 
+
 def rerank_with_gemini(query: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not GEMINI_RERANK_ENABLED or not GOOGLE_API_KEY:
         return candidates
@@ -253,7 +269,7 @@ def rerank_with_gemini(query: str, candidates: List[Dict[str, Any]]) -> List[Dic
             "\nCandidates:"
         ]
         for c in candidates:
-            brief = (c.get("description") or c.get("summary") or "")[:220].replace("\n"," ")
+            brief = (c.get("description") or c.get("summary") or "")[:220].replace("\n", " ")
             prompt_lines.append(f"{c['_id']} | Feature: {c.get('feature','N/A')} | Desc: {brief}")
         prompt = "\n".join(prompt_lines)
         response = model.generate_content(prompt)
@@ -276,11 +292,17 @@ async def lifespan(app: FastAPI):
     global embedding_model, mongo_client, db_collection
 
     logger.info("Loading embedding model...")
-    embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-    logger.info("✅ Embedding model loaded.")
-
-    logger.info("Connecting to MongoDB Atlas (async)...")
     try:
+        embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        logger.info("Embedding model loaded")
+    except Exception as e:
+        logger.exception("Failed to load embedding model: %s", e)
+        embedding_model = None
+
+    logger.info("Connecting to MongoDB (async)...")
+    try:
+        if not MONGO_CONNECTION_STRING:
+            raise RuntimeError("MONGO_CONNECTION_STRING environment variable is not set")
         mongo_client = AsyncIOMotorClient(
             MONGO_CONNECTION_STRING,
             serverSelectionTimeoutMS=5000,
@@ -288,21 +310,21 @@ async def lifespan(app: FastAPI):
         )
         await mongo_client.admin.command("ping")
         db_collection = mongo_client[DB_NAME][COLLECTION_NAME]
-        logger.info(f"✅ Connected to MongoDB | Collection='{COLLECTION_NAME}'")
-        logger.warning("⚠️ Ensure a Vector Search Index is created in MongoDB Atlas.")
+        logger.info(f"Connected to MongoDB | collection={COLLECTION_NAME}")
+        logger.warning("Ensure a Vector Search Index exists in MongoDB Atlas for the field 'main_vector'.")
     except Exception as e:
-        logger.error(f"❌ Failed to connect to MongoDB: {e}", exc_info=True)
+        logger.exception(f"Failed to connect to MongoDB: {e}")
         mongo_client, db_collection = None, None
 
-    logger.info("Configuring Gemini (if key present)...")
+    logger.info("Configuring Gemini if API key available...")
     configure_gemini()
 
     yield
 
     if mongo_client:
         mongo_client.close()
-        logger.info("🔒 MongoDB connection closed.")
-    logger.info("👋 Lifespan shutdown complete.")
+        logger.info("MongoDB connection closed")
+    logger.info("Application lifespan shutdown complete")
 
 # --- App init ---
 app = FastAPI(
@@ -312,15 +334,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+allowed_origins = [o.strip() for o in CORS_ALLOWED_ORIGINS.split(",")] if CORS_ALLOWED_ORIGINS != "*" else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET","POST","PUT","DELETE","OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
-templates = Jinja2Templates(directory=".")
+templates = Jinja2Templates(directory="templates")
 
 # --- Pydantic ---
 class UpdateTestCaseRequest(BaseModel):
@@ -359,13 +383,15 @@ async def upload_and_process_file(file: UploadFile = File(...)):
             df["Test Case ID"].str.strip().str.upper().ne("NA")
             & df["Test Case ID"].str.strip().ne("")
         ]
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error reading file: {e}", exc_info=True)
+        logger.exception("Error reading uploaded file: %s", e)
         raise HTTPException(status_code=500, detail=f"Error reading file: {e}")
 
     documents_to_insert = []
     grouped = df.groupby("Test Case ID")
-    logger.info(f"Processing {len(grouped)} unique test cases...")
+    logger.info("Processing %d unique test cases...", len(grouped))
 
     for test_case_id, group in grouped:
         feature = str(group.get("Feature", "").iloc[0]) if "Feature" in group else ""
@@ -380,7 +406,7 @@ async def upload_and_process_file(file: UploadFile = File(...)):
             if test_step:
                 formatted_step = (f"Step {step_no}: {test_step}" if step_no else test_step)
                 if expected_result:
-                    formatted_step += f" → Expected: {expected_result}"
+                    formatted_step += f" -> Expected: {expected_result}"
                 steps_list.append(formatted_step)
         steps_combined = "\n\n".join(steps_list)
 
@@ -388,16 +414,16 @@ async def upload_and_process_file(file: UploadFile = File(...)):
         summary = enrichment.get("summary", "")
         keywords = enrichment.get("keywords", []) or []
 
-        desc_emb = numpy_to_list(embedding_model.encode(description)) if description else []
-        steps_emb = numpy_to_list(embedding_model.encode(steps_combined)) if steps_combined else []
-        summary_emb = numpy_to_list(embedding_model.encode(summary)) if summary else []
+        desc_emb = numpy_to_list(embedding_model.encode(description)) if description and embedding_model else []
+        steps_emb = numpy_to_list(embedding_model.encode(steps_combined)) if steps_combined and embedding_model else []
+        summary_emb = numpy_to_list(embedding_model.encode(summary)) if summary and embedding_model else []
 
         valid_embeddings = [np.asarray(x, dtype=float) for x in [desc_emb, steps_emb, summary_emb] if x]
         if valid_embeddings:
             main_vector_np = np.mean(valid_embeddings, axis=0)
             main_vector = numpy_to_list(main_vector_np)
         else:
-            main_vector = numpy_to_list(embedding_model.encode(""))
+            main_vector = numpy_to_list(embedding_model.encode("")) if embedding_model else []
 
         document = {
             "_id": str(uuid.uuid4()),
@@ -420,10 +446,10 @@ async def upload_and_process_file(file: UploadFile = File(...)):
 
     try:
         result = await db_collection.insert_many(documents_to_insert)
-        logger.info(f"Inserted {len(result.inserted_ids)} documents.")
+        logger.info("Inserted %d documents.", len(result.inserted_ids))
         return {"message": f"Successfully processed and stored {len(result.inserted_ids)} test cases."}
     except Exception as e:
-        logger.error(f"Error inserting into MongoDB: {e}", exc_info=True)
+        logger.exception("Error inserting documents into MongoDB: %s", e)
         raise HTTPException(status_code=500, detail=f"Error storing data: {e}")
 
 @app.get("/api/get-all")
@@ -441,7 +467,7 @@ async def get_all_test_cases(skip: int = 0, limit: int = 50, sort_by: str = "Tes
             test_cases.append(doc)
         return {"success": True, "count": len(test_cases), "skip": skip, "limit": limit, "test_cases": test_cases}
     except Exception as e:
-        logger.error(f"Error retrieving test cases from MongoDB: {e}", exc_info=True)
+        logger.exception("Error retrieving test cases: %s", e)
         raise HTTPException(status_code=500, detail="An error occurred while retrieving data.")
 
 @app.post("/api/delete-all")
@@ -452,10 +478,10 @@ async def delete_all_data(confirm: bool = False):
         raise HTTPException(status_code=400, detail="Confirmation required. Pass ?confirm=true to delete all data.")
     try:
         await db_collection.drop()
-        logger.warning(f"⚠️ Dropped collection '{COLLECTION_NAME}'; all data cleared.")
+        logger.warning("Dropped collection '%s'; all data cleared.", COLLECTION_NAME)
         return {"success": True, "collection": COLLECTION_NAME, "message": f"All test case data in '{COLLECTION_NAME}' has been successfully deleted."}
     except Exception as e:
-        logger.error(f"❌ Failed to delete all data from '{COLLECTION_NAME}': {e}", exc_info=True)
+        logger.exception("Failed to delete all data from '%s': %s", COLLECTION_NAME, e)
         raise HTTPException(status_code=500, detail="An error occurred while deleting data.")
 
 @app.delete("/api/testcase/{doc_id}")
@@ -466,12 +492,12 @@ async def delete_test_case(doc_id: str):
         result = await db_collection.delete_one({"_id": doc_id})
         if result.deleted_count == 0:
             raise HTTPException(status_code=404, detail="Test case not found")
-        logger.info(f"Deleted test case {doc_id}")
+        logger.info("Deleted test case %s", doc_id)
         return {"success": True, "message": f"Test case {doc_id} deleted"}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error deleting test case {doc_id}: {e}", exc_info=True)
+        logger.exception("Error deleting test case %s: %s", doc_id, e)
         raise HTTPException(status_code=500, detail="Failed to delete test case")
 
 @app.put("/api/update/{doc_id}")
@@ -513,16 +539,16 @@ async def update_test_case(doc_id: str, update_data: UpdateTestCaseRequest = Bod
             if not update_data.keywords:
                 updated_doc["TestCaseKeywords"] = enrichment.get("keywords", []) or updated_doc.get("TestCaseKeywords", [])
 
-            desc_emb = numpy_to_list(embedding_model.encode(updated_doc.get("Test Case Description", "")))
-            steps_emb = numpy_to_list(embedding_model.encode(updated_doc.get("Steps", "")))
-            summary_emb = numpy_to_list(embedding_model.encode(updated_doc.get("TestCaseSummary", "")))
+            desc_emb = numpy_to_list(embedding_model.encode(updated_doc.get("Test Case Description", ""))) if embedding_model else []
+            steps_emb = numpy_to_list(embedding_model.encode(updated_doc.get("Steps", ""))) if embedding_model else []
+            summary_emb = numpy_to_list(embedding_model.encode(updated_doc.get("TestCaseSummary", ""))) if embedding_model else []
 
             valid_embeddings = [np.asarray(x, dtype=float) for x in [desc_emb, steps_emb, summary_emb] if x]
             if valid_embeddings:
                 main_vector_np = np.mean(valid_embeddings, axis=0)
                 main_vector = numpy_to_list(main_vector_np)
             else:
-                main_vector = numpy_to_list(embedding_model.encode(""))
+                main_vector = numpy_to_list(embedding_model.encode("")) if embedding_model else []
 
             updated_doc.update({
                 "desc_embedding": desc_emb,
@@ -532,7 +558,7 @@ async def update_test_case(doc_id: str, update_data: UpdateTestCaseRequest = Bod
             })
 
         await db_collection.replace_one({"_id": doc_id}, updated_doc)
-        logger.info(f"✅ Updated test case {doc_id}")
+        logger.info("Updated test case %s", doc_id)
 
         response_doc = updated_doc.copy()
         for field in ["desc_embedding", "steps_embedding", "summary_embedding", "main_vector"]:
@@ -542,7 +568,7 @@ async def update_test_case(doc_id: str, update_data: UpdateTestCaseRequest = Bod
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Error updating test case {doc_id}: {e}", exc_info=True)
+        logger.exception("Error updating test case %s: %s", doc_id, e)
         raise HTTPException(status_code=500, detail="An error occurred while updating the test case.")
 
 @app.post("/api/search")
@@ -559,10 +585,10 @@ async def search_test_cases(request: Request):
 
     cache_key = f"{raw_query}::feature={filter_feature}"
     if cached := cache_get(cache_key):
-        logger.info(f"⚡ Returning cached results for '{raw_query}' (feature={filter_feature})")
+        logger.info("Returning cached results for query '%s' (feature=%s)", raw_query, filter_feature)
         return {**cached, "from_cache": True}
 
-    logger.info(f"🔍 Search query='{raw_query}' | feature filter='{filter_feature}'")
+    logger.info("Search query='%s' | feature filter='%s'", raw_query, filter_feature)
 
     expansions = expand_query_with_gemini(raw_query) if QUERY_EXPANSION_ENABLED else [raw_query]
     all_expansions = [raw_query] + (expansions or [])
@@ -572,7 +598,7 @@ async def search_test_cases(request: Request):
         query_vector_raw = embedding_model.encode(combined_query)
         query_vector = numpy_to_list(query_vector_raw)
     except Exception as e:
-        logger.exception("Failed to compute query embedding")
+        logger.exception("Failed to compute query embedding: %s", e)
         raise HTTPException(status_code=500, detail="Failed to compute query embedding.")
 
     query_vec_np = np.asarray(query_vector, dtype=float)
@@ -595,7 +621,7 @@ async def search_test_cases(request: Request):
     try:
         search_results = await db_collection.aggregate(pipeline).to_list(length=CANDIDATES_TO_RETRIEVE)
     except Exception as e:
-        logger.error(f"❌ MongoDB vector search error: {e}", exc_info=True)
+        logger.exception("MongoDB vector search error: %s", e)
         raise HTTPException(status_code=500, detail="Search failed due to database error.")
 
     def cosine_sim(a, b):
@@ -636,7 +662,7 @@ async def search_test_cases(request: Request):
         sim_summary = cosine_sim(query_vec_np, summary_emb)
 
         keywords = [str(k).lower() for k in payload.get("TestCaseKeywords", []) or []]
-        text_fields = f'{payload.get("Feature","")} {payload.get("Test Case Description","")} {payload.get("Steps","")}'.lower()
+        text_fields = f'{payload.get("Feature","")} {payload.get("Test Case Description","")} {payload.get("Steps",")"') if False else f"{payload.get('Feature','')} {payload.get('Test Case Description','')} {payload.get('Steps','')}"
         text_tokens = tokenize_for_boost(text_fields)
 
         token_boost = 0.0
@@ -681,7 +707,7 @@ async def search_test_cases(request: Request):
     try:
         reranked = rerank_with_gemini(raw_query, top_candidates)
     except Exception as e:
-        logger.warning(f"Rerank with Gemini failed: {e}; falling back to local ranking.")
+        logger.warning("Rerank with Gemini failed: %s; falling back to local ranking.", e)
         reranked = top_candidates
 
     final_list = []
@@ -728,7 +754,7 @@ async def search_test_cases(request: Request):
 
     result = {"query": raw_query, "feature_filter": filter_feature, "results_count": len(response_items), "results": response_items, "from_cache": False}
     cache_set(cache_key, result)
-    logger.info(f"✅ Returning {len(response_items)} results for query '{raw_query}'")
+    logger.info("Returning %d results for query '%s'", len(response_items), raw_query)
     return result
 
-# --- End ---
+# --- End of file ---
